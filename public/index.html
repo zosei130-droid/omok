@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>오목</title>
+<style>
+  :root { --bg:#f4ead8; --ink:#3a2b1a; --accent:#c0582b; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,"Malgun Gothic",sans-serif;
+         min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:12px; }
+  h1 { margin:8px 0 12px; font-size:28px; }
+  .card { background:#fffaf0; border-radius:16px; padding:20px; width:100%; max-width:420px; box-shadow:0 2px 10px #0002; text-align:center; }
+  button { font:inherit; border:0; border-radius:12px; padding:14px 18px; background:var(--accent); color:#fff; font-weight:600; width:100%; margin:6px 0; cursor:pointer; }
+  button.sub { background:#8a7a65; }
+  button:disabled { opacity:.4; }
+  input { font:inherit; font-size:22px; letter-spacing:6px; text-align:center; width:100%; padding:12px; border:2px solid #cdbb9c; border-radius:12px; background:#fff; }
+  #game { display:none; width:100%; max-width:640px; flex-direction:column; align-items:center; }
+  #bar { display:flex; justify-content:space-between; align-items:center; width:100%; margin-bottom:8px; gap:8px; }
+  .pl { flex:1; padding:8px; border-radius:12px; background:#fffaf0; text-align:center; font-size:14px; border:3px solid transparent; }
+  .pl.active { border-color:var(--accent); }
+  .dot { display:inline-block; width:14px; height:14px; border-radius:50%; vertical-align:-2px; margin-right:4px; }
+  #status { font-weight:700; margin:6px 0 10px; min-height:24px; text-align:center; }
+  canvas { width:100%; max-width:600px; aspect-ratio:1; touch-action:manipulation; border-radius:8px; box-shadow:0 3px 12px #0003; }
+  #actions { display:flex; gap:8px; width:100%; max-width:600px; margin-top:10px; }
+  #actions button { margin:0; padding:12px; }
+  #code { font-size:30px; font-weight:800; letter-spacing:8px; color:var(--accent); }
+</style>
+</head>
+<body>
+<h1>⚫ 오목 ⚪</h1>
+
+<div id="lobby" class="card">
+  <button id="create">새 방 만들기</button>
+  <p style="color:#8a7a65;margin:14px 0 6px">또는 친구가 알려준 방 번호 입력</p>
+  <input id="joinCode" inputmode="numeric" maxlength="4" placeholder="0000">
+  <button id="join" class="sub">입장하기</button>
+  <p id="err" style="color:#c00;min-height:20px"></p>
+</div>
+
+<div id="game">
+  <div style="margin-bottom:6px">방 번호 <span id="code"></span></div>
+  <div id="bar">
+    <div class="pl" id="p1"></div>
+    <div class="pl" id="p2"></div>
+  </div>
+  <div id="status"></div>
+  <canvas id="board"></canvas>
+  <div id="actions">
+    <button id="confirm" disabled>여기에 두기</button>
+    <button id="undo" class="sub">무르기</button>
+    <button id="rematch" class="sub" style="display:none">다시 하기</button>
+  </div>
+  <p id="hint" style="font-size:13px;color:#8a7a65">칸을 눌러 미리보고, 다시 누르거나 '여기에 두기'로 확정해요.</p>
+</div>
+
+<script>
+const N = 15;
+const $ = (id) => document.getElementById(id);
+const canvas = $('board'), ctx = canvas.getContext('2d');
+let ws, st = null, pending = null, result = {}, shake = 0;
+
+function connect(first) {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => ws.send(JSON.stringify(first));
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onclose = () => { if (st) $('status').textContent = '연결이 끊겼어요. 새로고침 해주세요.'; };
+}
+function send(o) { ws.readyState === 1 && ws.send(JSON.stringify(o)); }
+
+function handle(m) {
+  if (m.type === 'error') { $('err').textContent = m.message; return; }
+  if (m.type === 'info') { alert(m.message); return; }
+  if (m.type === 'undoRequest') { send({ type: 'undoAnswer', ok: confirm('상대가 무르기를 요청했어요. 허락할까요?') }); return; }
+  if (m.type === 'state') {
+    st = m; pending = null;
+    result = { winner: m.winner, line: m.line, draw: m.draw };
+    $('lobby').style.display = 'none'; $('game').style.display = 'flex';
+    history.replaceState(null, '', '?room=' + m.code);
+    render();
+  }
+}
+
+function render() {
+  $('code').textContent = st.code;
+  const names = ['⚫ 흑 (선공)', '⚪ 백 (후공)'];
+  [1, 2].forEach((c) => {
+    const el = $('p' + c);
+    const me = st.you === c;
+    el.innerHTML = `<span class="dot" style="background:${c === 1 ? '#111' : '#fff;border:1px solid #888'}"></span>${me ? '나' : '친구'} · ${st.wins[c - 1]}승`;
+    el.classList.toggle('active', !st.over && st.turn === c);
+  });
+  let s;
+  if (!st.opponent) s = '친구를 기다리는 중… 방 번호를 알려주세요!';
+  else if (result.winner) s = result.winner === st.you ? '🎉 내가 이겼어요!' : '😢 졌어요…';
+  else if (result.draw) s = '무승부!';
+  else s = st.turn === st.you ? '내 차례예요' : '상대 차례…';
+  $('status').textContent = s;
+  $('rematch').style.display = st.over ? '' : 'none';
+  $('undo').style.display = st.over ? 'none' : '';
+  $('confirm').disabled = !pending || st.over || st.turn !== st.you;
+  draw();
+}
+
+function layout() {
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(canvas.parentElement.getBoundingClientRect().width);
+  const px = Math.round(Math.min(size, 600) * dpr);
+  if (px && canvas.width !== px) canvas.width = canvas.height = px;
+  return { dpr };
+}
+function draw() {
+  const { dpr } = layout();
+  const W = canvas.width, pad = W / (N + 1), step = (W - pad * 2) / (N - 1);
+  ctx.fillStyle = '#e3b868'; ctx.fillRect(0, 0, W, W);
+  ctx.strokeStyle = '#5a4020'; ctx.lineWidth = Math.max(1, dpr);
+  for (let i = 0; i < N; i++) {
+    ctx.beginPath(); ctx.moveTo(pad + i * step, pad); ctx.lineTo(pad + i * step, W - pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, pad + i * step); ctx.lineTo(W - pad, pad + i * step); ctx.stroke();
+  }
+  ctx.fillStyle = '#5a4020';
+  for (const [a, b] of [[3,3],[11,3],[3,11],[11,11],[7,7]]) {
+    ctx.beginPath(); ctx.arc(pad + a * step, pad + b * step, step * .1, 0, 7); ctx.fill();
+  }
+  if (!st) return;
+  const r = step * .44;
+  const stone = (x, y, c, alpha = 1) => {
+    const cx = pad + x * step, cy = pad + y * step;
+    ctx.globalAlpha = alpha;
+    const g = ctx.createRadialGradient(cx - r * .3, cy - r * .3, r * .1, cx, cy, r);
+    if (c === 1) { g.addColorStop(0, '#666'); g.addColorStop(1, '#000'); }
+    else { g.addColorStop(0, '#fff'); g.addColorStop(1, '#ccc'); }
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+  };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (st.board[y][x]) stone(x, y, st.board[y][x]);
+  if (st.last) { // 마지막 수 표시
+    const [x, y] = st.last; ctx.fillStyle = '#e03030';
+    ctx.beginPath(); ctx.arc(pad + x * step, pad + y * step, r * .22, 0, 7); ctx.fill();
+  }
+  if (pending) stone(pending[0], pending[1], st.you, .55);
+  if (result.line) {
+    ctx.strokeStyle = '#e03030'; ctx.lineWidth = 4 * dpr;
+    result.line.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(pad + x * step, pad + y * step, r + 3 * dpr, 0, 7); ctx.stroke(); });
+  }
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!st || st.over || !st.opponent || st.turn !== st.you) return;
+  const rect = canvas.getBoundingClientRect();
+  const W = rect.width, pad = W / (N + 1), step = (W - pad * 2) / (N - 1);
+  const x = Math.round((e.clientX - rect.left - pad) / step);
+  const y = Math.round((e.clientY - rect.top - pad) / step);
+  if (x < 0 || y < 0 || x >= N || y >= N || st.board[y][x]) return;
+  if (pending && pending[0] === x && pending[1] === y) return place();
+  pending = [x, y]; render();
+});
+function place() {
+  if (!pending) return;
+  send({ type: 'move', x: pending[0], y: pending[1] });
+  pending = null;
+}
+$('confirm').onclick = place;
+$('undo').onclick = () => { send({ type: 'undo' }); alert('무르기를 요청했어요.'); };
+$('rematch').onclick = () => send({ type: 'rematch' });
+$('create').onclick = () => connect({ type: 'create' });
+$('join').onclick = () => { const c = $('joinCode').value.trim(); if (c.length === 4) connect({ type: 'join', code: c }); else $('err').textContent = '4자리 방 번호를 입력하세요.'; };
+new ResizeObserver(() => st && draw()).observe($('game'));
+
+const q = new URLSearchParams(location.search).get('room');
+if (q) { $('joinCode').value = q; }
+draw();
+</script>
+</body>
+</html>
